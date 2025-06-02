@@ -9,7 +9,7 @@ use std::{
 };
 
 use once_cell::sync::Lazy;
-use regex::Regex;
+use regex::bytes::Regex;
 use serde_json::{Map, Value};
 #[cfg(feature = "tokio")]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,23 +26,21 @@ use crate::{WhoIsError, WhoIsLookupOptions, WhoIsServerValue};
 const DEFAULT_WHOIS_HOST_PORT: u16 = 43;
 const DEFAULT_WHOIS_HOST_QUERY: &str = "$addr\r\n";
 
-static RE_SERVER: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"(ReferralServer|Registrar Whois|Whois Server|WHOIS Server|Registrar WHOIS Server):[^\S\n]*(r?whois://)?(.*)").unwrap()
-});
+const RE_STR: &str = r"(ReferralServer|Registrar Whois|Whois Server|WHOIS Server|Registrar WHOIS Server):[^\S\n]*(r?whois://)?(.*)";
+
+static RE_SERVER: Lazy<Regex> = Lazy::new(|| Regex::new(RE_STR).unwrap());
 
 /// The `WhoIs` structure stores the list of WHOIS servers in-memory.
 #[derive(Debug, Clone)]
 pub struct WhoIs {
     map: HashMap<String, WhoIsServerValue>,
-    ip:  WhoIsServerValue,
+    ip: WhoIsServerValue,
 }
 
 impl WhoIs {
     /// Create a `WhoIs` instance which doesn't have a WHOIS server list. You should provide the host that is used for query ip. You may want to use the host `"whois.arin.net"`.
     pub fn from_host<T: AsRef<str>>(host: T) -> Result<WhoIs, WhoIsError> {
-        Ok(Self {
-            map: HashMap::new(), ip: WhoIsServerValue::from_string(host)?
-        })
+        Ok(Self { map: HashMap::new(), ip: WhoIsServerValue::from_string(host)? })
     }
 
     /// Read the list of WHOIS servers (JSON data) from a file to create a `WhoIs` instance.
@@ -114,10 +112,7 @@ impl WhoIs {
             }
         }
 
-        Ok(WhoIs {
-            map: new_map,
-            ip,
-        })
+        Ok(WhoIs { map: new_map, ip })
     }
 }
 
@@ -206,7 +201,7 @@ impl WhoIs {
         server: &WhoIsServerValue,
         text: &str,
         timeout: Option<Duration>,
-    ) -> Result<(String, String), WhoIsError> {
+    ) -> Result<(String, Vec<u8>), WhoIsError> {
         let addr = server.host.to_addr_string(DEFAULT_WHOIS_HOST_PORT);
 
         let mut client = if let Some(timeout) = timeout {
@@ -243,9 +238,9 @@ impl WhoIs {
 
         client.flush()?;
 
-        let mut query_result = String::new();
+        let mut query_result = Vec::new();
 
-        client.read_to_string(&mut query_result)?;
+        client.read_to_end(&mut query_result)?;
 
         Ok((addr, query_result))
     }
@@ -255,13 +250,14 @@ impl WhoIs {
         text: &str,
         timeout: Option<Duration>,
         mut follow: u16,
-    ) -> Result<String, WhoIsError> {
+    ) -> Result<Vec<u8>, WhoIsError> {
         let mut query_result = Self::lookup_once(server, text, timeout)?;
 
         while follow > 0 {
             if let Some(c) = RE_SERVER.captures(&query_result.1) {
                 if let Some(h) = c.get(3) {
-                    let h = h.as_str();
+                    let h = String::from_utf8_lossy(h.as_bytes());
+
                     if h.ne(&query_result.0) {
                         if let Ok(server) = WhoIsServerValue::from_string(h) {
                             query_result = Self::lookup_once(&server, text, timeout)?;
@@ -281,7 +277,7 @@ impl WhoIs {
     }
 
     /// Lookup a domain or an IP.
-    pub fn lookup(&self, options: WhoIsLookupOptions) -> Result<String, WhoIsError> {
+    pub fn lookup(&self, options: WhoIsLookupOptions) -> Result<Vec<u8>, WhoIsError> {
         match &options.target.0 {
             Host::IPv4(_) | Host::IPv6(_) => {
                 let server = match &options.server {
@@ -323,7 +319,7 @@ impl WhoIs {
         server: &WhoIsServerValue,
         text: &str,
         timeout: Option<Duration>,
-    ) -> Result<(String, String), WhoIsError> {
+    ) -> Result<(String, Vec<u8>), WhoIsError> {
         let addr = server.host.to_addr_string(DEFAULT_WHOIS_HOST_PORT);
 
         if let Some(timeout) = timeout {
@@ -364,9 +360,8 @@ impl WhoIs {
 
             tokio::time::timeout(timeout, client.flush()).await??;
 
-            let mut query_result = String::new();
-
-            tokio::time::timeout(timeout, client.read_to_string(&mut query_result)).await??;
+            let mut query_result = Vec::new();
+            tokio::time::timeout(timeout, client.read_to_end(&mut query_result)).await??;
 
             Ok((addr, query_result))
         } else {
@@ -382,9 +377,9 @@ impl WhoIs {
 
             client.flush().await?;
 
-            let mut query_result = String::new();
+            let mut query_result = Vec::new();
 
-            client.read_to_string(&mut query_result).await?;
+            client.read_to_end(&mut query_result).await?;
 
             Ok((addr, query_result))
         }
@@ -395,13 +390,14 @@ impl WhoIs {
         text: &'a str,
         timeout: Option<Duration>,
         mut follow: u16,
-    ) -> Result<String, WhoIsError> {
+    ) -> Result<Vec<u8>, WhoIsError> {
         let mut query_result = Self::lookup_inner_once_async(server, text, timeout).await?;
 
         while follow > 0 {
             if let Some(c) = RE_SERVER.captures(&query_result.1) {
                 if let Some(h) = c.get(3) {
-                    let h = h.as_str();
+                    let h = String::from_utf8_lossy(h.as_bytes());
+
                     if h.ne(&query_result.0) {
                         if let Ok(server) = WhoIsServerValue::from_string(h) {
                             query_result =
@@ -422,7 +418,7 @@ impl WhoIs {
     }
 
     /// Lookup a domain or an IP.
-    pub async fn lookup_async(&self, options: WhoIsLookupOptions) -> Result<String, WhoIsError> {
+    pub async fn lookup_async(&self, options: WhoIsLookupOptions) -> Result<Vec<u8>, WhoIsError> {
         match &options.target.0 {
             Host::IPv4(_) | Host::IPv6(_) => {
                 let server = match &options.server {
